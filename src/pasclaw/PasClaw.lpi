@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <ProjectOptions>
+    <Version Value="12"/>
+    <General>
+      <Flags>
+        <MainUnitHasCreateFormStatements Value="False"/>
+        <MainUnitHasTitleStatement Value="False"/>
+        <MainUnitHasScaledStatement Value="False"/>
+        <CompatibilityMode Value="True"/>
+      </Flags>
+      <SessionStorage Value="InProjectDir"/>
+      <Title Value="PasClaw"/>
+      <UseAppBundle Value="False"/>
+      <ResourceType Value="res"/>
+    </General>
+    <BuildModes Count="2">
+      <Item1 Name="Debug" Default="True"/>
+      <Item2 Name="Release">
+        <CompilerOptions>
+          <Version Value="11"/>
+          <Parsing>
+            <SyntaxOptions>
+              <UseAnsiStrings Value="False"/>
+            </SyntaxOptions>
+          </Parsing>
+        </CompilerOptions>
+      </Item2>
+    </BuildModes>
+    <PublishOptions>
+      <Version Value="2"/>
+      <UseFileFilters Value="True"/>
+    </PublishOptions>
+    <RunParams>
+      <FormatVersion Value="2"/>
+    </RunParams>
+    <RequiredPackages Count="2">
+      <Item1>
+        <PackageName Value="indylaz"/>
+      </Item1>
+      <Item2>
+        <PackageName Value="LCLBase"/>
+      </Item2>
+    </RequiredPackages>
+    <Units Count="1">
+      <Unit0>
+        <Filename Value="PasClaw.lpr"/>
+        <IsPartOfProject Value="True"/>
+      </Unit0>
+    </Units>
+  </ProjectOptions>
+  <CompilerOptions>
+    <Version Value="11"/>
+    <Target>
+      <Filename Value="../../build/lazarus/pasclaw"/>
+    </Target>
+    <SearchPaths>
+      <IncludeFiles Value="$(ProjOutDir);../../src/pkg/gateway;../../vendor/Indy/Lib/Core;../../vendor/Indy/Lib/Protocols;../../vendor/Indy/Lib/System"/>
+      <OtherUnitFiles Value="../../src/cmd;../../src/pkg/agent;../../src/pkg/channels;../../src/pkg/checkpoints;../../src/pkg/cliui;../../src/pkg/component;../../src/pkg/condense;../../src/pkg/config;../../src/pkg/cron;../../src/pkg/crypto;../../src/pkg/db;../../src/pkg/gateway;../../src/pkg/hashline;../../src/pkg/identity;../../src/pkg/json;../../src/pkg/kb;../../src/pkg/logger;../../src/pkg/markdown;../../src/pkg/memory;../../src/pkg/memory/localvector;../../src/pkg/mcp;../../src/pkg/membench;../../src/pkg/net;../../src/pkg/otel;../../src/pkg/platform;../../src/pkg/projects;../../src/pkg/providers;../../src/pkg/search;../../src/pkg/session;../../src/pkg/shell;../../src/pkg/skills;../../src/pkg/stream;../../src/pkg/tokenizer;../../src/pkg/tools;../../src/pkg/tui;../../src/pkg/updater;../../src/pkg/utils;../../src/pkg/vendor/dmvcframework;../../src/pkg/vendor/zpaq;../../vendor/Indy/Lib/Core;../../vendor/Indy/Lib/Protocols;../../vendor/Indy/Lib/System;../pkg/workflow;../../../ccr/indy/Lib/Protocols"/>
+      <UnitOutputDirectory Value="../../build/lazarus/lib/$(TargetCPU)-$(TargetOS)"/>
+    </SearchPaths>
+    <Parsing>
+      <SyntaxOptions>
+        <SyntaxMode Value="Delphi"/>
+        <UseAnsiStrings Value="False"/>
+      </SyntaxOptions>
+    </Parsing>
+    <CodeGeneration>
+      <SmartLinkUnit Value="True"/>
+      <SmallerCode Value="True"/>
+    </CodeGeneration>
+    <Linking>
+      <Debugging>
+        <GenerateDebugInfo Value="False"/>
+        <DebugInfoType Value="dsDwarf3"/>
+      </Debugging>
+      <LinkSmart Value="True"/>
+    </Linking>
+    <Other>
+      <CustomOptions Value="-Sh
+-dFPC
+-dLCL"/>
+    </Other>
+  </CompilerOptions>
+  <Debugging>
+    <Exceptions Count="3">
+      <Item1>
+        <Name Value="EAbort"/>
+      </Item1>
+      <Item2>
+        <Name Value="ECodetoolError"/>
+      </Item2>
+      <Item3>
+        <Name Value="EFOpenError"/>
+      </Item3>
+    </Exceptions>
+  </Debugging>
+</CONFIG>
