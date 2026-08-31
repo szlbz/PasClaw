@@ -173,7 +173,7 @@ var
   a: string;
 begin
   Result := False;
-  if (GetEnvironmentVariable('NO_COLOR') <> '') or (GetEnvironmentVariable('TERM') = 'dumb') then
+  if (SysUtils.GetEnvironmentVariable('NO_COLOR') <> '') or (SysUtils.GetEnvironmentVariable('TERM') = 'dumb') then
     Exit(True);
   for i := 1 to ParamCount do
   begin
@@ -214,10 +214,10 @@ procedure ApplyTimezoneFromEnv;
 var
   Tz: string;
 begin
-  Tz := GetEnvironmentVariable('TZ');
+  Tz := SysUtils.GetEnvironmentVariable('TZ');
   if Tz = '' then Exit;
   PrintLn('TZ environment: ' + Tz);
-  PrintLn('ZONEINFO environment: ' + GetEnvironmentVariable('ZONEINFO'));
+  PrintLn('ZONEINFO environment: ' + SysUtils.GetEnvironmentVariable('ZONEINFO'));
   { FPC honours the TZ environment variable on Unix natively; on Windows we
     simply report it and let the RTL handle conversions. }
 end;
