@@ -209,8 +209,16 @@ type
        string on purpose: resolving it here, inside the same lock as the
        provider snapshot, is what keeps the model and the provider it
        belongs to from being chosen a moment apart. *)
+    (* WantsWeb says this turn's job is to search the WEB (a search or
+       research page), as opposed to reading the workspace or composing
+       from what it already has. It is a request, not a decision: the
+       body drops the tool registry only when doing so is what buys
+       grounding -- no local web_search tool, and a provider that
+       grounds natively. It also gates the one retry without grounding
+       when the model turns out not to support it. *)
     function RunDesktopTurn(const SystemPrompt, Prompt: string;
                             Narrate: Boolean; UseFastModel: Boolean;
+                            WantsWeb: Boolean;
                             out Reply, Err: string): Boolean; overload;
     (* One turn on a STANDING AGENT's own session (PasClaw.Agents).
 
@@ -225,6 +233,29 @@ type
        turn is over. *)
     function RunAgentTurn(const AgentName, Prompt: string;
                           out Reply, Err: string): Boolean;
+    (* The operator's brake, asked by the tool loop at every safe
+       boundary of an agent turn. A method rather than a plain function
+       because the loop's hook is a method pointer, and on the server
+       rather than on a per-run object because the answer -- "has the
+       operator paused the agent system?" -- is the same for every run.
+
+       This is what makes `pasclaw team pause` (and the desktop's Pause
+       all) an actual stop rather than a request. The wind-down note in
+       SetAgentsPaused still goes out and is still the nicer outcome --
+       an agent that reads it writes down where it got to before it
+       stops -- but a turn that never calls another tool would never
+       read it, and that is exactly the runaway an operator hits pause
+       for. Every turn now ends at its next boundary whether the model
+       cooperates or not.
+
+       Reads paused.json each time it is asked, which sounds wasteful
+       and is not: boundaries are one per loop iteration and an
+       iteration costs a provider round trip. Reading it fresh is also
+       the point -- a flag cached at turn start would be the same flag
+       that was False when the turn began. A torn read while the file
+       is being rewritten parses as nothing and answers False, so the
+       stop lands one iteration later instead of the pause being lost. *)
+    function OperatorPaused: Boolean;
     { OnToolCall sink for a narrated turn -- turns each tool call into a
       page-progress event so the desktop can show work rather than a
       spinner. A method, not a closure: the loop's hook is a method
@@ -585,6 +616,13 @@ function SessionFromUserField(const UserVal: string): string;
    a function -- the Responses API's flat top-level "name", and the
    Chat-Completions nested function.name. Exposed for tests. *)
 function ResolveResponsesToolChoice(Req: TJsonObject): string;
+
+{ One transcript message as the session routes serialise it -- role,
+  content, and the tool work (flattened calls + tool_call_id) a client
+  needs to rebuild tool cards on reload. Public because the SHAPE is the
+  contract the desktop's reopened chats depend on, and a shape only a
+  live socket can observe is a shape no test can pin. }
+function TranscriptMessageJSON(const M: PasClaw.Providers.Types.TMessage): TJsonObject;
 
 implementation
 
@@ -1510,6 +1548,19 @@ end;
 var
   GDesktopGateway: TGatewayServer = nil;
 
+type
+  (* The team wake loop's clock; body sits with the other desktop
+     callbacks further down. TeamTickPass decides which teams are due
+     (per-team wake_minutes); this thread only supplies a coarse
+     heartbeat, and Stop terminates it with the server. *)
+  TTeamTickThread = class(TThread)
+  protected
+    procedure Execute; override;
+  end;
+
+var
+  GTeamTick: TTeamTickThread = nil;
+
 { Registered from Start. Forward-declared because the implementation lives
   further down, next to the agent machinery it drives. }
 procedure InstallDesktopCallbacks(AGateway: TGatewayServer); forward;
@@ -1554,6 +1605,7 @@ begin
   { Drop the desktop's handle first: a callback firing against a
     stopping server would run a turn nobody can read. }
   if GDesktopGateway = Self then GDesktopGateway := nil;
+  if GTeamTick <> nil then GTeamTick.Terminate;
   StopAllApps;
   if not FStarted then Exit;
   try
@@ -4024,6 +4076,48 @@ begin
   end;
 end;
 
+(* One transcript message for a session-reading client, tool work
+   included.
+
+   Both session readers used to serialise role + content and nothing
+   else, which quietly made the stored record unreconstructable from
+   outside: an assistant turn's tool CALLS (name and arguments) and the
+   ids pairing results to them are on disk -- MessageToJSON writes them,
+   the model needs them -- but a client reading the route got a
+   transcript with the work cut out. The web UI papered over it with its
+   own tool_details blob; the desktop, which lets the gateway own the
+   conversation, had nothing to rebuild its tool cards from on reload.
+
+   The calls are flattened to {id, name, args}: the nested OpenAI
+   function shape exists for providers, and a reader rendering a card
+   should not need to know it. provider_signature stays private -- it is
+   plumbing between us and Gemini, not part of the conversation. *)
+function TranscriptMessageJSON(const M: PasClaw.Providers.Types.TMessage): TJsonObject;
+var
+  Calls: TJsonArray;
+  C: TJsonObject;
+  i: Integer;
+begin
+  Result := TJsonObject.Create;
+  Result.PutStr('role',    MsgRoleToString(M.Role));
+  Result.PutStr('content', M.Content);
+  if M.Name <> ''       then Result.PutStr('name',         M.Name);
+  if M.ToolCallId <> '' then Result.PutStr('tool_call_id', M.ToolCallId);
+  if Length(M.ToolCalls) > 0 then
+  begin
+    Calls := TJsonArray.Create;
+    for i := 0 to High(M.ToolCalls) do
+    begin
+      C := TJsonObject.Create;
+      C.PutStr('id',   M.ToolCalls[i].Id);
+      C.PutStr('name', M.ToolCalls[i].Func.Name);
+      C.PutStr('args', M.ToolCalls[i].Func.Arguments);
+      Calls.AddObject(C);
+    end;
+    Result.PutArray('tool_calls', Calls);
+  end;
+end;
+
 procedure TGatewayServer.HandleSessionItem(const Doc: string;
                                            ARequest: TIdHTTPRequestInfo;
                                            AResp: TIdHTTPResponseInfo);
@@ -4216,9 +4310,7 @@ begin
         Arr := TJsonArray.Create;
         for i := 0 to High(LogMsgs) do
         begin
-          MsgObj := TJsonObject.Create;
-          MsgObj.PutStr('role',    MsgRoleToString(LogMsgs[i].Role));
-          MsgObj.PutStr('content', LogMsgs[i].Content);
+          MsgObj := TranscriptMessageJSON(LogMsgs[i]);
           Arr.AddObject(MsgObj);
         end;
         Root.PutArray('messages', Arr);
@@ -4264,9 +4356,7 @@ begin
       Arr := TJsonArray.Create;
       for i := 0 to High(S.Messages) do
       begin
-        MsgObj := TJsonObject.Create;
-        MsgObj.PutStr('role',    MsgRoleToString(S.Messages[i].Role));
-        MsgObj.PutStr('content', S.Messages[i].Content);
+        MsgObj := TranscriptMessageJSON(S.Messages[i]);
         Arr.AddObject(MsgObj);
       end;
       Root.PutArray('messages', Arr);
@@ -6118,6 +6208,53 @@ begin
   PublishPageProgress(Phase, Detail);
 end;
 
+type
+  (* Live narration for ONE agent run. The tool-loop hook has no
+     argument for "whose turn is this", so the name rides on an object
+     created for the run and freed with it -- up to 8 runs narrate
+     concurrently without sharing state. What it publishes is what the
+     agent chat window shows while the session file is still unwritten. *)
+  TAgentNarrator = class
+  private
+    FAgent: string;
+  public
+    constructor Create(const AAgent: string);
+    procedure OnToolCall(const Name, ArgsJSON: string);
+  end;
+
+constructor TAgentNarrator.Create(const AAgent: string);
+begin
+  inherited Create;
+  FAgent := AAgent;
+end;
+
+procedure TAgentNarrator.OnToolCall(const Name, ArgsJSON: string);
+var
+  Obj: TJsonObject;
+  Detail: string;
+begin
+  { The most human argument, not the JSON: a path, a command, a query,
+    an action -- whichever the tool carries. }
+  Detail := '';
+  Obj := nil;
+  try
+    Obj := TJsonObject.Parse(ArgsJSON);
+  except
+    Obj := nil;
+  end;
+  if Obj <> nil then
+  try
+    Detail := Obj.GetStr('path', '');
+    if Detail = '' then Detail := Obj.GetStr('command', '');
+    if Detail = '' then Detail := Obj.GetStr('query', '');
+    if Detail = '' then Detail := Obj.GetStr('action', '');
+    if Detail = '' then Detail := Obj.GetStr('title', '');
+  finally
+    Obj.Free;
+  end;
+  PublishAgentActivity(FAgent, Name, Detail);
+end;
+
 procedure TGatewayServer.ResolveFastModel(out ProviderName, Model: string);
 begin
   FApplyLock.Acquire;
@@ -6180,14 +6317,19 @@ end;
 function TGatewayServer.RunDesktopTurn(const SystemPrompt, Prompt: string;
   Narrate: Boolean; out Reply, Err: string): Boolean;
 begin
-  Result := RunDesktopTurn(SystemPrompt, Prompt, Narrate, False, Reply, Err);
+  Result := RunDesktopTurn(SystemPrompt, Prompt, Narrate, False, False, Reply, Err);
+end;
+
+function TGatewayServer.OperatorPaused: Boolean;
+begin
+  Result := AgentsPaused;
 end;
 
 function TGatewayServer.RunAgentTurn(const AgentName, Prompt: string;
   out Reply, Err: string): Boolean;
 var
   Info: TAgentInfo;
-  Sid, Sys, Task: string;
+  Sid, Sys, Task, Notice: string;
   Stored: TSession;
   Msgs, Fresh: TMessageArray;
   Loop: TToolLoopResult;
@@ -6199,6 +6341,7 @@ var
   FastProv: ILLMProvider;
   FastModel: string;
   TurnLock: SyncObjs.TCriticalSection;
+  Narrator: TAgentNarrator;
 begin
   Reply := '';
   Err := '';
@@ -6253,9 +6396,20 @@ begin
   LoopCfg.Registry := FRegistry;
   if FToolsHonorInMemoryConfig then LoopCfg.ActiveConfig := FCfg;
   LoopCfg.Model := DefModel;
-  { The agent's own model when it named one -- a cheap IC and an
-    expensive lead are the point of the field. }
-  if Info.Model <> '' then LoopCfg.Model := Info.Model;
+  (* The agent's own model when it named one -- a cheap IC and an
+     expensive lead are the point of the field. Two TIER words resolve
+     here rather than going to the provider as literal model names:
+     'fast' is the cheap pair (provider and model move together, the
+     same rule the page path follows) and 'primary' is the default
+     spelled out. Team templates only ever use tiers -- a template
+     that pinned a model id would go stale the day the id did. *)
+  if Info.Model = 'fast' then
+  begin
+    if FastProv <> nil then LoopCfg.Provider := FastProv;
+    if FastModel <> '' then LoopCfg.Model := FastModel;
+  end
+  else if (Info.Model <> '') and (Info.Model <> 'primary') then
+    LoopCfg.Model := Info.Model;
   LoopCfg.MaxIterations  := FMaxIter;
   LoopCfg.Parallel       := True;
   LoopCfg.Mode           := pmBuild;
@@ -6295,6 +6449,10 @@ begin
      both read the stored prefix would each persist their own view and
      one would silently lose the other. A supervisor restarting an agent
      the operator just woke is exactly that race. *)
+  Narrator := TAgentNarrator.Create(Info.Name);
+  LoopCfg.OnToolCall   := Narrator.OnToolCall;
+  LoopCfg.ShouldCancel := OperatorPaused;
+
   TurnLock := SessionTurnLock(Sid);
   TurnLock.Enter;
   try
@@ -6312,6 +6470,26 @@ begin
       Err := 'agent loop failed';
       Exit;
     end;
+    (* Stopped by the operator. Say so IN the transcript, not just to
+       whoever called: this conversation persists and the agent's next
+       turn reads it back, so a stop that left no trace would look to
+       the agent like a turn it simply never answered -- and the work
+       it did before the stop would be re-done. The notice carries the
+       progress ledger for exactly that reason.
+
+       Written into Loop.Content so it takes the one path that already
+       gets this right: PersistGatewaySession appends Content as the
+       assistant turn and logs it. *)
+    if Loop.Cancelled then
+    begin
+      Notice := FormatCancelledNotice(Loop, AgentsPausedNote,
+                                      '`pasclaw team resume`, or Resume all ' +
+                                      'on the desktop');
+      if Trim(Loop.Content) <> '' then
+        Loop.Content := Trim(Loop.Content) + sLineBreak + sLineBreak + Notice
+      else
+        Loop.Content := Notice;
+    end;
     Reply := Loop.Content;
     PersistGatewaySession(FCfg, Sid,
                           'Agent: ' + Info.Title,
@@ -6319,11 +6497,49 @@ begin
     Result := True;
   finally
     TurnLock.Leave;
+    Narrator.Free;
   end;
 end;
 
+(* Did the provider itself refuse, as opposed to the model answering?
+
+   StatusCode is the signal rather than sniffing the text: providers set
+   200 on success, -1 on socket/TLS/DNS failure, and the real code on an
+   HTTP error. 0 means a provider that never sets it, so it is not
+   treated as a failure. On refusal the loop's Content carries the
+   provider's own message, which is the only useful thing to say. *)
+function ProviderRefused(const Loop: TToolLoopResult; out Msg: string): Boolean;
+begin
+  Msg := '';
+  Result := (Loop.LastResp.StatusCode <> 0) and
+            ((Loop.LastResp.StatusCode < 200) or (Loop.LastResp.StatusCode > 299));
+  if not Result then Exit;
+  Msg := Trim(Loop.Content);
+  if Msg = '' then
+    Msg := Format('the provider call failed (status %d)',
+                  [Loop.LastResp.StatusCode]);
+end;
+
+(* "This model cannot ground", said in whichever words the provider
+   chose. Gemini answers a grounding request on a model without it with
+   400 "Search Grounding is not supported for model ...".
+
+   Matched on the words rather than on a model list on purpose: which
+   models can ground is Google's matrix, it moves, and a blocklist
+   compiled into a release is wrong the moment it does. The provider
+   already knows the answer; this only has to recognise it being said. *)
+function GroundingRefused(const Msg: string): Boolean;
+var
+  M: string;
+begin
+  M := LowerCase(Msg);
+  Result := ((Pos('grounding', M) > 0) or (Pos('google_search', M) > 0)) and
+            ((Pos('not supported', M) > 0) or (Pos('unsupported', M) > 0) or
+             (Pos('not available', M) > 0));
+end;
+
 function TGatewayServer.RunDesktopTurn(const SystemPrompt, Prompt: string;
-  Narrate: Boolean; UseFastModel: Boolean;
+  Narrate: Boolean; UseFastModel: Boolean; WantsWeb: Boolean;
   out Reply, Err: string): Boolean;
 var
   Msgs: TMessageArray;
@@ -6333,6 +6549,10 @@ var
   FB: TLLMProviderArray;
   FBModels: TStringArray;
   DefModel, FastModel: string;
+  Attempt: Integer;
+  Failed: string;
+  GroundNatively: Boolean;
+  WebTool: TTool;
 begin
   Reply := '';
   Err := '';
@@ -6353,9 +6573,6 @@ begin
     Err := 'no provider configured';
     Exit;
   end;
-
-  SetLength(Msgs, 1);
-  Msgs[0] := MakeMessage(mrUser, Prompt);
 
   LoopCfg.Registry := FRegistry;
   if FToolsHonorInMemoryConfig then LoopCfg.ActiveConfig := FCfg;
@@ -6394,11 +6611,93 @@ begin
     that a progress feed would be noise on the event bus. }
   if Narrate then LoopCfg.OnToolCall := NarrateToolCall;
 
-  if not RunToolLoop(LoopCfg, Msgs, Loop) then
+  (* Drop the local tools ONLY when doing so is what buys the page a way
+     to search -- never merely because it is a page.
+
+     The problem: Gemini rejects google_search alongside
+     functionDeclarations below 3.x, so shipping the registry made the
+     provider suppress grounding on every page. With no web_search tool
+     either -- it registers only when an operator has configured a
+     search provider -- Search and Research had no way to search at all,
+     and every page came back UNGROUNDED while the Browser showed a
+     badge implying otherwise.
+
+     But the tools are the answer for other pages, so all three
+     conditions have to hold:
+
+       WantsWeb    -- pkSearch/pkResearch. A pkData page is told to read
+                      "files, memory notes, project manifests and
+                      session data with the tools you have"; taking the
+                      registry away leaves it prompted to do something
+                      it cannot do. pkReport composes from what the turn
+                      already gathered.
+       no web_search -- an operator who configured Brave or Tavily gets
+                      those tools, and they work on every provider
+                      rather than only where native grounding exists.
+                      Their explicit configuration outranks ours.
+       native search -- there is no point paying for the trade against a
+                      provider that has no grounding to gain.
+
+     Codex P1 on PR #588: the first cut dropped the registry for every
+     page and broke both of the first two cases. *)
+  GroundNatively := WantsWeb and (LoopCfg.Provider <> nil) and
+                    LoopCfg.Provider.SupportsNativeSearch and
+                    not ((FRegistry <> nil) and FRegistry.Find('web_search', WebTool));
+  if GroundNatively then
   begin
-    Err := 'agent loop failed';
-    Exit;
+    LoopCfg.Registry := nil;
+    LogDebug('page: no local search tool and %s grounds natively -- ' +
+             'sending no tools so grounding is not suppressed',
+             [LoopCfg.Model]);
   end;
+
+  Attempt := 0;
+  repeat
+    Inc(Attempt);
+    { Rebuilt each attempt: RunToolLoop appends the turn's history. }
+    SetLength(Msgs, 1);
+    Msgs[0] := MakeMessage(mrUser, Prompt);
+
+    if not RunToolLoop(LoopCfg, Msgs, Loop) then
+    begin
+      Err := 'agent loop failed';
+      Exit;
+    end;
+
+    (* A provider error is not a page. RunToolLoop reports success and
+       hands back the provider's error text as CONTENT when the call
+       itself failed -- so "gemini error: status=-1 msg=Socket Error
+       # 111 Connection refused." was wrapped in the report chrome,
+       saved to disk, and served as a finished research report with
+       HTTP 200. *)
+    if not ProviderRefused(Loop, Failed) then Break;
+
+    (* Grounding refused: ask again without it rather than failing.
+
+       The alternative is an error where a page should be, on the
+       reasonable request "search this for me" -- and the page can
+       still be written, it just cannot be grounded. It says so: the
+       Browser's badge reads UNGROUNDED and the page carries the same
+       warning it always has for an ungrounded answer. Honest and
+       useful beats correct and empty.
+
+       Once only, and only for a page: a second refusal is a real
+       failure and should be reported as one. *)
+    if GroundNatively and (Attempt = 1) and
+       (not LoopCfg.Options.DisableServerTools) and
+       GroundingRefused(Failed) then
+    begin
+      LogInfo('page: %s cannot ground -- retrying without search ' +
+              'grounding; the page will be marked ungrounded',
+              [LoopCfg.Model]);
+      LoopCfg.Options.DisableServerTools := True;
+      Continue;
+    end;
+
+    Err := Failed;
+    Exit;
+  until False;
+
   Reply := Loop.Content;
   Result := True;
 end;
@@ -6526,7 +6825,7 @@ begin
      snapshot so the two cannot be chosen a moment apart. *)
   if not GDesktopGateway.RunDesktopTurn(Prompt,
        'Produce the page now.', Kind = pkResearch, Kind <> pkResearch,
-       Reply, Err) then
+       Kind in [pkSearch, pkResearch], Reply, Err) then
     Exit;
   (* "Drafting", not "Writing": deepening rounds follow, each rewriting
      this draft, and a dialog that said "Writing" and THEN "Deepening:
@@ -6584,7 +6883,7 @@ begin
         Format('round %d -- %d source(s) so far', [Depth, Have]));
       if not GDesktopGateway.RunDesktopTurn(
            BuildDeepenPrompt(Query, BodyHTML, SourcesJSON),
-           'Deepen the report now.', True, False, Round_, RoundErr) then
+           'Deepen the report now.', True, False, True, Round_, RoundErr) then
       begin
         LogDebug('page: deepen round %d failed (%s) -- keeping the report ' +
                  'as it stands', [Depth, RoundErr]);
@@ -6893,6 +7192,49 @@ begin
   Result := GDesktopGateway.RunDesktopTurn(SystemPrompt, Prompt, False, Reply, Err);
 end;
 
+(* What `team up` warns about: the flags a working team needs. The
+   board tools (project/task) sit behind desktop_tools_enabled and the
+   agent-to-agent messaging tool behind agent_tools_enabled, both off
+   by default -- a team seeded with either off half-works in ways that
+   look like model stupidity. Named here, where the config is. *)
+function DesktopTeamFlagsProbe: string;
+begin
+  Result := '';
+  if GDesktopGateway = nil then Exit;
+  if not GDesktopGateway.FCfg.DesktopToolsEnabled then
+    Result := 'desktop_tools_enabled is off: the team cannot manage its ' +
+              'task board. Set {"desktop_tools_enabled": true} in config.json.';
+  if not GDesktopGateway.FCfg.AgentToolsEnabled then
+  begin
+    if Result <> '' then Result := Result + ' ';
+    Result := Result + 'agent_tools_enabled is off: team members cannot ' +
+              'message each other. Set {"agent_tools_enabled": true} in ' +
+              'config.json.';
+  end;
+end;
+
+procedure TTeamTickThread.Execute;
+var
+  I: Integer;
+begin
+  while not Terminated do
+  begin
+    { Sleep in small slices so Stop is honoured promptly. }
+    for I := 1 to 30 do
+    begin
+      if Terminated then Exit;
+      Sleep(1000);
+    end;
+    if GDesktopGateway = nil then Continue;
+    try
+      TeamTickPass;
+    except
+      on E: Exception do
+        LogWarn('team tick: %s: %s', [E.ClassName, E.Message]);
+    end;
+  end;
+end;
+
 procedure InstallDesktopCallbacks(AGateway: TGatewayServer);
 begin
   GDesktopGateway := AGateway;
@@ -6900,6 +7242,12 @@ begin
   SetJobRunner(DesktopJobRunner);
   SetTextGenerator(DesktopTextGenerator);
   SetAgentRunner(DesktopAgentRunner);
+  SetTeamFlagsProbe(DesktopTeamFlagsProbe);
+  if GTeamTick = nil then
+  begin
+    GTeamTick := TTeamTickThread.Create(False);
+    GTeamTick.FreeOnTerminate := False;
+  end;
 end;
 
 function GenChatCompletionId: string;

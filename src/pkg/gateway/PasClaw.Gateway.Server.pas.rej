@@ -1,0 +1,11 @@
+--- src\pkg\gateway\PasClaw.Gateway.Server.pas	Sun Aug 23 05:27:54 2026
++++ src\pkg\gateway\PasClaw.Gateway.Server.pas	Mon Aug 31 11:24:58 2026
+@@ -6198,7 +6198,7 @@
+   DefModel: string;
+   FastProv: ILLMProvider;
+   FastModel: string;
+-  TurnLock: TCriticalSection;
++  TurnLock: SyncObjs.TCriticalSection;
+ begin
+   Reply := '';
+   Err := '';
