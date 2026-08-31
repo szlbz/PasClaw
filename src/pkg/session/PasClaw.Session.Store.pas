@@ -694,7 +694,7 @@ begin
   end;
 end;
 
-function MessageToJSON(const M: TMessage): TJsonObject;
+function MessageToJSON(const M: PasClaw.Providers.Types.TMessage): TJsonObject;
 var
   Arr: TJsonArray;
   TCO: TJsonObject;
@@ -717,7 +717,7 @@ begin
   end;
 end;
 
-procedure MessageFromJSON(const Obj: TJsonObject; out M: TMessage);
+procedure MessageFromJSON(const Obj: TJsonObject; out M: PasClaw.Providers.Types.TMessage);
 var
   Arr: TJsonArray;
   TCO: TJsonObject;
@@ -829,7 +829,7 @@ var
   L: TStringList;
   i, Idx, First, Last, N: Integer;
   Obj: TJsonObject;
-  M: TMessage;
+  M: PasClaw.Providers.Types.TMessage;
 begin
   Total := 0;
   SetLength(Result, 0);
@@ -871,7 +871,7 @@ begin
       if Line = '' then Continue;
       if (N >= First) and (N <= Last) then
       begin
-        M := Default(TMessage);
+        M := Default(PasClaw.Providers.Types.TMessage);
         try
           Obj := TJsonObject.Parse(Line);
           try
@@ -884,7 +884,7 @@ begin
             keep the slot, say so, and carry on. }
           on E: Exception do
           begin
-            M := Default(TMessage);
+            M := Default(PasClaw.Providers.Types.TMessage);
             M.Role := mrAssistant;
             M.Content := '(unreadable log entry)';
           end;
@@ -911,9 +911,9 @@ end;
 
 var
   GTurnLocks: TStringList = nil;          { Id -> TCriticalSection }
-  GTurnLocksLock: TCriticalSection = nil;
+  GTurnLocksLock: SyncObjs.TCriticalSection;// = nil;
 
-function SessionTurnLock(const Id: string): TCriticalSection;
+function SessionTurnLock(const Id: string): SyncObjs.TCriticalSection;
 var
   Idx: Integer;
 begin
@@ -921,10 +921,10 @@ begin
   try
     Idx := GTurnLocks.IndexOf(Id);
     if Idx >= 0 then
-      Result := TCriticalSection(GTurnLocks.Objects[Idx])
+      Result := SyncObjs.TCriticalSection(GTurnLocks.Objects[Idx])
     else
     begin
-      Result := TCriticalSection.Create;
+      Result := SyncObjs.TCriticalSection.Create;
       GTurnLocks.AddObject(Id, Result);
     end;
   finally
@@ -1778,7 +1778,7 @@ end;
 
 initialization
   Randomize;
-  GTurnLocksLock := TCriticalSection.Create;
+  GTurnLocksLock := SyncObjs.TCriticalSection.Create;
   GTurnLocks := TStringList.Create;
   GTurnLocks.Sorted := True;          { binary lookup; ids are few but hot }
   GTurnLocks.Duplicates := dupError;
